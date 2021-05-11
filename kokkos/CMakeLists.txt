@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(batched_gaussian_elimination_kokkos)
+
+find_package(Kokkos REQUIRED)
+
+add_executable(batched_gaussian_elimination_kokkos batched_gaussian_elimination_kokkos.cpp)
+
+target_link_libraries(batched_gaussian_elimination_kokkos Kokkos::kokkos)
+

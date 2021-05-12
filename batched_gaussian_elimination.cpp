@@ -262,6 +262,8 @@ void kernel(const int nnodes, double * __restrict A, double * __restrict x, doub
       for (int i = 0; i < nnodes; ++i) {
         A[i+nnodes*j] = (double)(i+nnodes*j);
       }
+      // Ensure it is non-singular
+      A[j+nnodes*j+nnodes*nnodes] += 2.0;
       b[j] = (double)j;
       x[j] = 0.0;
     }
@@ -306,6 +308,8 @@ void kernel_shared(const int tid, const int nnodes, double * __restrict A, doubl
       for (int i = 0; i < nnodes; ++i) {
         A[i+nnodes*j+nnodes*nnodes*tid] = (double)(i+nnodes*j);
       }
+      // Ensure it is non-singular
+      A[j+nnodes*j+nnodes*nnodes*tid] += 2.0;
       b[j+nnodes*tid] = (double)j;
       x[j+nnodes*tid] = 0.0;
     }

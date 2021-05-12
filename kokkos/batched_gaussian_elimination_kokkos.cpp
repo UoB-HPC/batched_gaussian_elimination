@@ -248,6 +248,8 @@ void kernel(const int buckets, const int nnodes, Kokkos::View<double**,Kokkos::L
       for (int i = 0; i < nnodes; ++i) {
         A(i,j) = (double)(i+nnodes*j);
       }
+      // Ensure non-signular
+      A(j,j) += 2.0;
       b(j) = (double)j;
       x(j, tid) = 0.0;
     });
@@ -301,6 +303,8 @@ void kernel_shared(const int buckets, const int nnodes, Kokkos::View<double***,K
       for (int i = 0; i < nnodes; ++i) {
         A(i,j,tid) = (double)(i+nnodes*j);
       }
+      // Ensure non-signular
+      A(j,j, tid) += 2.0;
       b(j, tid) = (double)j;
       x(j, tid) = 0.0;
     });

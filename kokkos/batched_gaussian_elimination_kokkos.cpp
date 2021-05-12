@@ -5,7 +5,7 @@
 
 #include <Kokkos_Core.hpp>
 
-void kernel(const int nnodes, double * __restrict A, double * __restrict x, double * __restrict b);
+void kernel(const int buckets, const int nnodes, Kokkos::View<double**,Kokkos::LayoutLeft>& x);
 void kernel_shared(const int buckets, const int nnodes, Kokkos::View<double***,Kokkos::LayoutLeft>& A, Kokkos::View<double**,Kokkos::LayoutLeft>& x, Kokkos::View<double**,Kokkos::LayoutLeft>& b);
 
 
@@ -55,14 +55,16 @@ int main(int argc, char *argv[]) {
   // Check if only running one case
   if (argc == 5) {
     int option = atoi(argv[4]);
-    if (option < 1 || option > 3) {
-      std::cerr << "Input error: option must be 1, 2 or 3" << std::endl;
+    if (option < 1 || option > 3 || option == 2) {
+      std::cerr << "Input error: option must be 1 or 3" << std::endl;
+      exit(EXIT_FAILURE);
     }
     run[option] = true;
   } else {
     for (int i = 0; i < 4; ++i) {
       run[i] = true;
     }
+    run[2] = false;
   }
 
   // Standard timers
@@ -76,60 +78,29 @@ int main(int argc, char *argv[]) {
   //   Each thread allocates its own local data
   //
   if (run[1]) {
-    std::cout << "TODO" << std::endl;
-  /*
   int opt = 1;
-  // Possible with Team Only memory in Kokkos, but not to test the allocation differences.
-  double ** A = new double*[nthreads];
-  double ** b = new double*[nthreads];
-  double ** x = new double*[nthreads];
 
-  // Allocate array per thread
-  time = omp_get_wtime();
-  #pragma omp parallel
-  {
-    A[omp_get_thread_num()] = new double[nnodes*nnodes];
-    b[omp_get_thread_num()] = new double[nnodes];
-    x[omp_get_thread_num()] = new double[nnodes];
-  }
-  alloc_time[opt] = omp_get_wtime() - time;
+  // Memory allocation just need x in global
+  auto tic = std::chrono::high_resolution_clock::now();
+  Kokkos::View<double**, Kokkos::LayoutLeft>  x {"x", static_cast<size_t>(nnodes), static_cast<size_t>(buckets)};
+  Kokkos::fence();
+  auto toc = std::chrono::high_resolution_clock::now();
+  alloc_time[opt] = static_cast<std::chrono::duration<double>>(toc-tic).count();
 
-  // Initialise data
-  time = omp_get_wtime();
-  #pragma omp parallel
-  {
-    for (int j = 0; j < nnodes; ++j) {
-      for (int i = 0; i < nnodes; ++i) {
-        A[omp_get_thread_num()][i+nnodes*j] = (double)(i+nnodes*j);
-      }
-      b[omp_get_thread_num()][j] = (double)j;
-      x[omp_get_thread_num()][j] = 0.0;
-    }
-  }
-  init_time[opt] = omp_get_wtime() - time;
+
+  // Initialise data occurs later
+  init_time[opt] = 0.0;
 
   // Solve system in each thread a number of times
-  time = omp_get_wtime();
+  tic = std::chrono::high_resolution_clock::now();
   for (int n = 0; n < ntimes; ++n) {
-    #pragma omp parallel for
-    for (int nb = 0; nb < buckets; ++nb) {
-      kernel(nnodes, A[omp_get_thread_num()], x[omp_get_thread_num()], b[omp_get_thread_num()]);
-    }
+    kernel(buckets, nnodes, x);
   }
-  run_time[opt] = omp_get_wtime() - time;
+  Kokkos::fence();
+  toc = std::chrono::high_resolution_clock::now();
+  run_time[opt] = static_cast<std::chrono::duration<double>>(toc-tic).count();
 
  
-  // Free memory
-  #pragma omp parallel
-  {
-    delete[] A[omp_get_thread_num()];
-    delete[] b[omp_get_thread_num()];
-    delete[] x[omp_get_thread_num()];
-  }
-  delete[] A;
-  delete[] b;
-  delete[] x;
-  */
   }
 
   //
@@ -258,48 +229,64 @@ int main(int argc, char *argv[]) {
 
 }
 
-// Perform in-place Gaussian elimination on one matrix A to solve Ax=b.
+// Perform in-place Gaussian elimination on one batch of matrices A to solve Ax=b.
 // The matrix is in row-major order
-void kernel(const int nnodes, double * __restrict A, double * __restrict x, double * __restrict b) {
+void kernel(const int buckets, const int nnodes, Kokkos::View<double**,Kokkos::LayoutLeft>& x) {
+  Kokkos::TeamPolicy<> policy(buckets, Kokkos::AUTO);
+  policy = policy.set_scratch_size(0, Kokkos::PerTeam(sizeof(double)*nnodes*nnodes+sizeof(double)*nnodes));
+  Kokkos::parallel_for(policy, KOKKOS_LAMBDA (const auto& team_member) {
+    const int tid = team_member.league_rank();
 
-// Reinit
-    for (int j = 0; j < nnodes; ++j) {
+    // Allocate team-local A and b Views
+    //double* A = (double*) team_member.team_shmem().get_shmem(sizeof(double)*nnodes*nnodes);
+    //double* b = (double*) team_member.team_shmem().get_shmem(sizeof(double)*nnodes);
+    Kokkos::View<double**,Kokkos::DefaultExecutionSpace::scratch_memory_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>> A(team_member.team_scratch(0), static_cast<size_t>(nnodes),  static_cast<size_t>(nnodes));
+    Kokkos::View<double*,Kokkos::DefaultExecutionSpace::scratch_memory_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>> b(team_member.team_scratch(0), static_cast<size_t>(nnodes));
+
+    // (Re)init
+    Kokkos::parallel_for(Kokkos::TeamThreadRange<>(team_member, nnodes), [=](const int& j) {
       for (int i = 0; i < nnodes; ++i) {
-        A[i+nnodes*j] = (double)(i+nnodes*j);
+        A(i,j) = (double)(i+nnodes*j);
       }
-      b[j] = (double)j;
-      x[j] = 0.0;
-    }
+      b(j) = (double)j;
+      x(j, tid) = 0.0;
+    });
+    team_member.team_barrier();
 
-  //
-  // Uses Gaussian elimination
-  //
-  // Generate upper triangular matrix
-  // Subtract multiples of rows from top to bottom
-  for (int j = 0; j < nnodes; ++j) { // Loop over rows
-    const double Ajj = A[j+nnodes*j];
-    if (Ajj != 0.0) {
-      for (int i = j+1; i < nnodes; ++i) { // Loop over rows beneath jth row
-        const double c = A[j+nnodes*i] / Ajj;
-        #pragma omp simd
-        for (int k = 0; k < nnodes; ++k) { // Loop over entries in row
-            A[k+nnodes*i] -= c * A[k+nnodes*j];
+    //
+    // Uses Gaussian elimination
+    //
+    // Generate upper triangular matrix
+    // Subtract multiples of rows from top to bottom
+    for (int j = 0; j < nnodes; ++j) { // Loop over rows
+      const double Ajj = A(j,j);
+      if (Ajj != 0.0) {
+        for (int i = j+1; i < nnodes; ++i) { // Loop over rows beneath jth row
+          const double c =  A(j,i) / Ajj;
+          team_member.team_barrier();
+          Kokkos::parallel_for(Kokkos::TeamThreadRange(team_member, nnodes), [=](const int& k) {
+            // Loop over entries in row
+            A(k,i) -= c * A(k,j);
+          });
+          b(i) -= c * b(j);
+          team_member.team_barrier();
         }
-        b[i] -= c * b[j];
       }
     }
-  }
 
-  // Backwards substitution
-  for (int j = nnodes-1; j >= 0; --j) {
-    x[j] = b[j] / A[j+nnodes*j];
-    #pragma omp simd
-    for (int i = 0; i < j; ++i) {
-      b[i] -= x[j] * A[j+nnodes*i];
-      A[j+nnodes*i] = 0.0;
+    // Backwards substitution
+    for (int j = nnodes-1; j >= 0; --j) {
+      x(j,tid) = b(j) / A(j,j);
+      team_member.team_barrier();
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(team_member, nnodes), [=](const int& i) {
+        b(i) -= x(j,tid) * A(j,i);
+        A(j,i) = 0.0;
+      });
+      team_member.team_barrier();
     }
-  }
+  });
 }
+
 
 // Perform in-place Gaussian elimination on ~one~ a bucket of matrices A to solve Ax=b.
 // The matrix is in row-major order
